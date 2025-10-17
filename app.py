@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from fastapi.responses import JSONResponse, FileResponse
-
+from fastapi.responses import HTMLResponse
 # ---------------------------
 # Load environment variables
 # ---------------------------
