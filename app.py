@@ -144,6 +144,9 @@ def detect_template(brief: str) -> str:
     else:
         return "sum-of-sales"
 
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return "<h1>Service is running!</h1><p>Use /api/request for tasks.</p>"
 
 # ---------------------------
 # Static App Generator (core)
