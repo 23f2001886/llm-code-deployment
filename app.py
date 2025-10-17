@@ -76,6 +76,9 @@ class TaskRequest(BaseModel):
 
 class StatusResponse(BaseModel):
     status: str
+    repo_url: str | None = None
+    commit_sha: str | None = None
+    pages_url: str | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -410,6 +413,11 @@ def deploy_to_github(workdir: Path, payload: TaskRequest):
 
 
 # ---------------------------
+# In-memory store for deployment results
+# ---------------------------
+deployment_results: Dict[str, Dict[str, str]] = {}  # nonce -> repo_url, commit_sha, pages_url
+
+# ---------------------------
 # API Endpoints
 # ---------------------------
 @app.post("/api/request", response_model=StatusResponse)
@@ -429,26 +437,57 @@ async def handle_request(payload: TaskRequest, background_tasks: BackgroundTasks
         template_id = detect_template(payload.brief)
         generate_static_app(template_id, payload, workdir)
 
+    # Background deployment
     def deploy_task():
         try:
             repo_url, commit_sha, pages_url = deploy_to_github(workdir, payload)
+            deployment_results[payload.nonce] = {
+                "repo_url": repo_url,
+                "commit_sha": commit_sha,
+                "pages_url": pages_url,
+            }
             log(f"Deployment finished. Pages URL: {pages_url}")
+
+            # Notify evaluation server if provided
+            if payload.evaluation_url:
+                try:
+                    requests.post(
+                        payload.evaluation_url,
+                        headers={"Content-Type": "application/json"},
+                        json={
+                            "email": payload.email,
+                            "task": payload.task,
+                            "round": payload.round,
+                            "nonce": payload.nonce,
+                            "repo_url": repo_url,
+                            "commit_sha": commit_sha,
+                            "pages_url": pages_url,
+                        },
+                        timeout=600
+                    )
+                    log("✅ Evaluation server notified successfully")
+                except Exception as e:
+                    log(f"❌ Failed to notify evaluation server: {e}")
+
         except Exception as e:
             log(f"Deployment failed: {e}")
+            deployment_results[payload.nonce] = {"error": str(e)}
 
     background_tasks.add_task(deploy_task)
 
-    return {"status": "success"}
+    # Return immediate status; client can poll /api/status/{nonce} for URLs
+    return {"status": "pending", "repo_url": None, "commit_sha": None, "pages_url": None}
 
 
-@app.get("/api/status/{nonce}")
+@app.get("/api/status/{nonce}", response_model=StatusResponse)
 async def get_deploy_status(nonce: str):
-    site_dir = Path(f"workdir_{nonce}/site")
-    if site_dir.exists():
-        files = [f.name for f in site_dir.glob("*")]
-        return {"status": "ready", "files": files}
-    else:
-        raise HTTPException(status_code=404, detail="Site not found")
+    if nonce in deployment_results:
+        result = deployment_results[nonce]
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        return {"status": "success", **result}
+    return {"status": "pending", "repo_url": None, "commit_sha": None, "pages_url": None}
+
 
 
 @app.get("/api/validate-secret")
@@ -557,7 +596,20 @@ async def handle_round2(payload: TaskRequest):
 
             # --- Notify evaluation server ---
             try:
-                resp = requests.post(payload.evaluation_url, json={"round": 2, "secret": payload.secret}, timeout=600)
+                resp = requests.post(
+                    payload.evaluation_url,
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "email": payload.email,
+                        "task": payload.task,
+                        "round": 2,
+                        "nonce": payload.nonce,
+                        "repo_url": f"https://github.com/{GITHUB_USERNAME}/llm-task-{payload.task}",
+                        "commit_sha": run_shell("git rev-parse HEAD", cwd=workdir),
+                        "pages_url": f"https://{GITHUB_USERNAME}.github.io/llm-task-{payload.task}/"
+                    },
+                    timeout=600
+                )
                 if resp.status_code == 200:
                     log("✅ Evaluation server notified successfully for Round 2")
                 else:
@@ -574,10 +626,33 @@ async def handle_round2(payload: TaskRequest):
 
 
 
-    # Run in background thread
-    threading.Thread(target=_deploy, daemon=True).start()
-    return {"status": "success"}
-
 @app.post("/api/evaluate")
 async def evaluate(payload: dict):
+    evaluation_url = payload.get("evaluation_url")
+    if not evaluation_url:
+        raise HTTPException(status_code=400, detail="evaluation_url missing")
+
+    try:
+        data = {
+            "email": payload.get("email"),
+            "task": payload.get("task"),
+            "round": payload.get("round", 2),
+            "nonce": payload.get("nonce"),
+            "repo_url": payload.get("repo_url"),
+            "commit_sha": payload.get("commit_sha"),
+            "pages_url": payload.get("pages_url")
+        }
+        resp = requests.post(
+            evaluation_url,
+            headers={"Content-Type": "application/json"},
+            json=data,
+            timeout=600
+        )
+        if resp.status_code == 200:
+            log("✅ Evaluation server notified successfully")
+        else:
+            log(f"⚠️ Evaluation server responded: {resp.status_code}")
+    except Exception as e:
+        log(f"❌ Failed to notify evaluation server: {e}")
+
     return {"status": "ok"}
