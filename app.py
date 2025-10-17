@@ -476,10 +476,30 @@ async def handle_request(payload: TaskRequest, background_tasks: BackgroundTasks
             log(f"Deployment failed: {e}")
             deployment_results[payload.nonce] = {"error": str(e)}
 
-    background_tasks.add_task(deploy_task)
+    repo_url, commit_sha, pages_url = deploy_to_github(workdir, payload)
 
-    # Return immediate status; client can poll /api/status/{nonce} for URLs
-    return {"status": "pending", "repo_url": None, "commit_sha": None, "pages_url": None}
+    # Notify evaluation server immediately
+    if payload.evaluation_url:
+        requests.post(
+            payload.evaluation_url,
+            headers={"Content-Type": "application/json"},
+            json={
+                "email": payload.email,
+                "task": payload.task,
+                "round": payload.round,
+                "nonce": payload.nonce,
+                "repo_url": repo_url,
+                "commit_sha": commit_sha,
+                "pages_url": pages_url,
+            },
+            timeout=600
+        )
+    return {
+        "status": "success",
+        "repo_url": repo_url,
+        "commit_sha": commit_sha,
+        "pages_url": pages_url
+    }
 
 
 @app.get("/api/status/{nonce}", response_model=StatusResponse)
